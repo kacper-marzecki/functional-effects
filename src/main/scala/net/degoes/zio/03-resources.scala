@@ -1,16 +1,27 @@
 package net.degoes.zio
 
+import java.io.{ByteArrayInputStream, File, FileInputStream}
+
 import zio._
 import java.text.NumberFormat
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 
+import scala.io.Source
+
 object Cat extends App {
   import zio.console._
   import zio.blocking._
   import java.io.IOException
 
+  def autoClose[A <: AutoCloseable,B](closeable: A)(f: (A) ⇒ B): B = {
+    try {
+      f(closeable)
+    } finally {
+      closeable.close()
+    }
+  }
   /**
    * EXERCISE
    *
@@ -18,7 +29,7 @@ object Cat extends App {
    * blocking thread pool, storing the result into a string.
    */
   def readFile(file: String): ZIO[Blocking, IOException, String] =
-    ???
+    effectBlockingIO(autoClose(scala.io.Source.fromFile(file))(_.mkString))
 
   /**
    * EXERCISE
@@ -27,7 +38,10 @@ object Cat extends App {
    * contents of the specified file to standard output.
    */
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    ???
+    args match {
+      case Nil => putStrLn("No file arg passed").exitCode
+      case file ::  _ =>readFile(file).flatMap(it => putStrLn(it)).exitCode
+    }
 }
 
 object CatBracket extends App {
@@ -37,7 +51,7 @@ object CatBracket extends App {
   import scala.io.Source
 
   def open(file: String): ZIO[Blocking, IOException, Source] =
-    effectBlockingIO(scala.io.Source.fromFile(file))
+    effectBlockingIO(Source.fromFile(file))
 
   def close(source: Source): ZIO[Blocking, IOException, Unit] =
     effectBlockingIO(source.close())
@@ -49,7 +63,9 @@ object CatBracket extends App {
    * fail to close the file, no matter what happens during reading.
    */
   def readFile(file: String): ZIO[Blocking, IOException, String] =
-    ???
+    ZIO.bracket(open(file))(s => UIO(s.close())) { s=>
+      ZIO.succeed(s.mkString)
+    }
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
     (for {
@@ -91,7 +107,7 @@ object SourceManaged extends App {
       val close: ZSource => ZIO[Blocking, Nothing, Unit] =
         _.execute(_.close()).orDie
 
-      ???
+      ZManaged.make(open)(close)
     }
   }
 
@@ -104,7 +120,16 @@ object SourceManaged extends App {
    */
   def readFiles(
     files: List[String]
-  ): ZIO[Blocking with Console, IOException, List[String]] = ???
+  ): ZIO[Blocking with Console, IOException, List[String]] =
+    ZManaged.foreachPar(files)(s => ZSource.make(s))
+      .use(files => ZIO.foreach(files)(_.execute(_.mkString)))
+//    for {
+//      files <-
+//      content <-
+//    } yield content
+
+
+
 
   /**
    * EXERCISE
@@ -115,7 +140,10 @@ object SourceManaged extends App {
    * anything except an error message.
    */
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    ???
+      readFiles(args)
+        .map(_.map(putStrLn(_)))
+        .flatMap(ZIO.collectAll(_))
+      .exitCode
 }
 
 object CatIncremental extends App {
@@ -142,10 +170,12 @@ object CatIncremental extends App {
    * it is impossible to forget to close an open handle.
    */
   object FileHandle {
-    final def open(file: String): ZIO[Blocking, IOException, FileHandle] =
-      effectBlockingIO(new FileHandle(new FileInputStream(file)))
+    final def open(file: String): ZManaged[Blocking, IOException, FileHandle] =
+      ZManaged.make(effectBlockingIO(new FileHandle(new FileInputStream(file))))(_.close.orDie)
   }
 
+
+  val asString = (chunk: Chunk[Byte]) => chunk.map(_.toChar).mkString
   /**
    * EXERCISE
    *
@@ -153,7 +183,10 @@ object CatIncremental extends App {
    * a time, stopping when there are no more chunks left.
    */
   def cat(fh: FileHandle): ZIO[Blocking with Console, IOException, Unit] =
-    ???
+    fh.read.flatMap {
+      case Some(chunk) => putStr(asString(chunk)).flatMap(_ => cat(fh))
+      case None => ZIO.succeed(())
+    }
 
   /**
    * EXERCISE
@@ -164,14 +197,14 @@ object CatIncremental extends App {
    */
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
     args match {
-      case _ :: Nil =>
+      case file :: Nil =>
         /**
          * EXERCISE
          *
          * Open the specified file, safely create and use a file handle to
          * incrementally dump the contents of the file to standard output.
          */
-        ???
+        FileHandle.open(file).use(cat).exitCode
 
       case _ => putStrLn("Usage: cat <file>") as ExitCode(2)
     }
